@@ -1,0 +1,14 @@
+﻿# Dependencies / build artifacts
+node_modules/
+dist/
+build/
+*.pyc
+__pycache__/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+release/

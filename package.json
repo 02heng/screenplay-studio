@@ -1,0 +1,74 @@
+{
+  "name": "screenplay-studio",
+  "version": "0.1.0",
+  "description": "剧本生成工作台 — Electron + FastAPI",
+  "author": "",
+  "license": "MIT",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev:renderer": "vite",
+    "dev:electron": "cross-env NODE_ENV=development electron .",
+    "dev": "concurrently -k \"npm run dev:renderer\" \"wait-on http://127.0.0.1:5173 && npm run dev:electron\"",
+    "backend": "cd backend && uvicorn app.main:app --reload --host 127.0.0.1 --port 18766",
+    "prestart": "npm run build:renderer",
+    "start": "electron .",
+    "build:renderer": "vite build",
+    "pack": "npm run build:renderer && node ./node_modules/electron-builder/cli.js --dir",
+    "dist": "npm run build:renderer && node ./node_modules/electron-builder/cli.js --publish never",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "wait-on": "^8.0.1"
+  },
+  "dependencies": {
+    "@types/react-router-dom": "^5.3.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.15.0"
+  },
+  "build": {
+    "appId": "com.screenplaystudio.app",
+    "productName": "Screenplay Studio",
+    "copyright": "Copyright © contributors",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*.cjs",
+      "renderer/dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/venv/**",
+          "!**/.venv/**"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

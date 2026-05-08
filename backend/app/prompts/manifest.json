@@ -1,0 +1,116 @@
+{
+  "version": "2.0.0",
+  "description": "竖屏短剧剧本改编全套制作提示词系统",
+  "platform_standard": "红果短剧",
+  "format_standard": {
+    "words_per_episode": "350-450",
+    "max_words_first_3": 500,
+    "dialogue_ratio": "55%-65%",
+    "action_ratio": "25%-30%",
+    "scene_ratio": "5%-10%",
+    "max_dialogue_chars": 15,
+    "mandatory_reversal_episodes": [3, 10, 20],
+    "opening_hook_seconds": 10,
+    "ending_hook_seconds": 15,
+    "aspect_ratio": "9:16",
+    "fps": "24/30"
+  },
+  "prompts": [
+    {
+      "id": "screenplay_adapter",
+      "file": "screenplay_adapter.md",
+      "name": "主改编提示词",
+      "description": "竖屏短剧剧本改编核心系统提示词，包含完整格式规范、改编原则和示例",
+      "usage": "作为所有改编任务的 system prompt 基础",
+      "tags": ["核心", "格式规范", "改编原则"]
+    },
+    {
+      "id": "character_analyzer",
+      "file": "character_analyzer.md",
+      "name": "人物分析提示词",
+      "description": "从小说原文提取人物信息，建立完整人物档案（含改编适配建议），输出 JSON 格式",
+      "usage": "改编前分析原著人物，第一步使用",
+      "tags": ["人物", "分析", "前置步骤", "JSON输出"]
+    },
+    {
+      "id": "plot_outliner",
+      "file": "plot_outliner.md",
+      "name": "情节大纲提示词",
+      "description": "生成分集大纲，遵循三幕结构，在第3/10/20集安排强反转，输出 JSON 格式",
+      "usage": "人物分析完成后生成全剧大纲",
+      "tags": ["大纲", "结构", "前置步骤", "JSON输出"]
+    },
+    {
+      "id": "hook_generator",
+      "file": "hook_generator.md",
+      "name": "钩子生成专项提示词",
+      "description": "专门优化开场10秒强钩子和结尾15秒悬念钩子，提供多种方案供选择",
+      "usage": "针对具体集数优化钩子，可单独使用",
+      "tags": ["钩子", "悬念", "开场", "结尾", "留存率"]
+    },
+    {
+      "id": "episode_writer",
+      "file": "episode_writer.md",
+      "name": "单集写作提示词",
+      "description": "根据大纲和人物档案写作单集完整剧本，严格控制字数、格式、对白比例",
+      "usage": "逐集写作时使用，配合大纲和记忆上下文",
+      "tags": ["写作", "单集", "核心"]
+    },
+    {
+      "id": "storyboard_director",
+      "file": "storyboard_director.md",
+      "name": "分镜导演提示词",
+      "description": "将文字剧本拆解为逐镜头分镜方案，包含景别/运镜/AI图像提示词/动画提示词/时长，输出 JSON 格式",
+      "usage": "剧本完成后生成分镜脚本，含AI绘图所需提示词",
+      "tags": ["分镜", "拍摄", "AI提示词", "导演", "JSON输出"]
+    },
+    {
+      "id": "edit_script",
+      "file": "edit_script.md",
+      "name": "剪辑脚本提示词",
+      "description": "根据分镜脚本制定完整剪辑方案：时间线切单表、转场、BGM节点、音效、字幕、调色建议",
+      "usage": "分镜完成后生成剪辑脚本，可直接导入剪映/DaVinci",
+      "tags": ["剪辑", "时间线", "BGM", "音效", "字幕", "JSON输出"]
+    }
+  ],
+  "pipelines": {
+    "novel_adapt": {
+      "name": "小说改编流水线",
+      "description": "将小说节选改编为竖屏短剧全套制作文件",
+      "phases": [
+        {"id": "digest",               "name": "原著解读",   "output": "角色表+时间线+关键情节点"},
+        {"id": "characters",           "name": "人物档案",   "output": "JSON格式完整人物卡"},
+        {"id": "adapt_outline",        "name": "分集大纲",   "output": "三幕结构+分集大纲JSON"},
+        {"id": "episode_scripts",      "name": "剧本正文",   "output": "前三集完整剧本"},
+        {"id": "storyboard",           "name": "分镜脚本",   "output": "逐镜头JSON+AI提示词"},
+        {"id": "edit_script",          "name": "剪辑脚本",   "output": "时间线切单表JSON"},
+        {"id": "production_checklist", "name": "制作清单",   "output": "一页制作状态总览"}
+      ]
+    },
+    "short_drama": {
+      "name": "原创短剧流水线",
+      "description": "从命题/logline出发，创作竖屏短剧全套制作文件",
+      "phases": [
+        {"id": "bible",            "name": "剧本圣经",   "output": "人设卡+核心冲突+世界观"},
+        {"id": "characters",       "name": "人物档案",   "output": "JSON格式完整人物卡"},
+        {"id": "episode_skeleton", "name": "分集粗纲",   "output": "每集钩子类型+情绪走向"},
+        {"id": "beat_sheet",       "name": "节拍表",     "output": "30秒粒度节拍明细"},
+        {"id": "script_snippet",   "name": "剧本正文",   "output": "前三集完整剧本"},
+        {"id": "storyboard",       "name": "分镜脚本",   "output": "逐镜头JSON+AI提示词"},
+        {"id": "edit_script",      "name": "剪辑脚本",   "output": "时间线切单表JSON"}
+      ]
+    }
+  },
+  "standalone_tools": [
+    {
+      "id": "hook_generator",
+      "name": "钩子生成器",
+      "description": "为任意集数生成开场钩子和结尾悬念方案（可单独调用）"
+    },
+    {
+      "id": "character_analyzer",
+      "name": "人物分析器",
+      "description": "为任意文本段落提取人物信息（可单独调用）"
+    }
+  ]
+}

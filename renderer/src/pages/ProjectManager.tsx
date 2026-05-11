@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { type ProjectType, useProjects } from '../hooks/useProjects';
 import DownloadTab from '../tabs/DownloadTab';
+import SettingsTab from '../tabs/SettingsTab';
 
-type PageTab = 'projects' | 'download';
+type PageTab = 'projects' | 'download' | 'settings';
 
 const TYPE_LABELS: Record<ProjectType, string> = {
   feature: '院线长剧本',
@@ -82,7 +83,19 @@ export default function ProjectManager() {
         >
           小说下载
         </button>
+        <button
+          className={`pm-tab${activeTab === 'settings' ? ' pm-tab--active' : ''}`}
+          onClick={() => setActiveTab('settings')}
+        >
+          设置
+        </button>
       </nav>
+
+      {activeTab === 'settings' && (
+        <div className="pm-settings-wrap">
+          <SettingsTab />
+        </div>
+      )}
 
       {/* ── 小说下载标签页 ── */}
       {activeTab === 'download' && (

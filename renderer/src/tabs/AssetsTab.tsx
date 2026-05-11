@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useAppDialog } from '../context/AppDialogContext';
 import { getBackendBase } from '../hooks/useBackend';
 
 interface Asset { name: string; path: string; relative: string; size: number }
@@ -10,6 +11,7 @@ const KIND_LABELS: Record<Kind, string> = { images: '图片库', videos: '视频
 interface Props { projectId: number }
 
 export default function AssetsTab({ projectId }: Props) {
+  const { confirm: appConfirm } = useAppDialog();
   const [kind, setKind] = useState<Kind>('images');
   const [assets, setAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(false);
@@ -41,6 +43,12 @@ export default function AssetsTab({ projectId }: Props) {
   };
 
   const deleteAsset = async (relative: string) => {
+    const fname = relative.split(/[/\\]/).pop() ?? relative;
+    if (!(await appConfirm({
+      title: '删除素材',
+      message: `确定删除素材「${fname}」吗？磁盘上的项目文件将一并删除，且不可恢复。`,
+      confirmLabel: '删除',
+    }))) return;
     const base = await getBackendBase();
     await fetch(`${base}/api/projects/${projectId}/assets/file?relative=${encodeURIComponent(relative)}`, { method: 'DELETE' });
     setAssets((prev) => prev.filter((a) => a.relative !== relative));

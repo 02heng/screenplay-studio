@@ -81,7 +81,7 @@
         {"id": "digest",               "name": "原著解读",   "output": "角色表+时间线+关键情节点"},
         {"id": "characters",           "name": "人物档案",   "output": "JSON格式完整人物卡"},
         {"id": "adapt_outline",        "name": "分集大纲",   "output": "三幕结构+分集大纲JSON"},
-        {"id": "episode_scripts",      "name": "剧本正文",   "output": "前三集完整剧本"},
+        {"id": "novel_screenplay",   "name": "剧本改编正文",   "output": "小说→竖屏剧本（不得新增角色）"},
         {"id": "storyboard",           "name": "分镜脚本",   "output": "逐镜头JSON+AI提示词"},
         {"id": "edit_script",          "name": "剪辑脚本",   "output": "时间线切单表JSON"},
         {"id": "production_checklist", "name": "制作清单",   "output": "一页制作状态总览"}

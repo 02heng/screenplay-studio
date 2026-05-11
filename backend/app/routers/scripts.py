@@ -105,7 +105,11 @@ def _save_to_disk(script: Script, project_id: int) -> None:
     """Persist script content to project assets/scripts directory."""
     scripts_dir = project_asset_dir(project_id) / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
-    safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (script.title or "untitled"))
+    # Only keep ASCII alphanumeric + safe chars, truncate to 40 chars to avoid MAX_PATH
+    safe_title = "".join(
+        c if (c.isascii() and (c.isalnum() or c in "-_ ")) else "_"
+        for c in (script.title or "untitled")
+    )[:40].strip("_") or "script"
     path = scripts_dir / f"{script.id}_{safe_title}.md"
     path.write_text(script.content or "", encoding="utf-8")
     script.file_path = str(path)

@@ -1,0 +1,16 @@
+# 图片生成 Provider（启用一个即可）
+image_provider:
+  name: wanx            # wanx | volcengine | kling_image | comfyui | dalle3
+  api_key: ""           # 从环境变量读取: IMAGE_API_KEY
+  base_url: ""          # ComfyUI 等本地服务填写
+  model: "wanx2.1-t2i-turbo"
+  size: "1024x1024"
+
+# 视频生成 Provider（启用一个即可）
+video_provider:
+  name: kling           # kling | seedance | wan21 | vidu | cogvideox
+  api_key: ""           # VIDEO_API_KEY
+  base_url: ""
+  model: "kling-v2-master"
+  duration: 5           # 默认时长秒数
+  aspect_ratio: "9:16"  # 竖屏短剧

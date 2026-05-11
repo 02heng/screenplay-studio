@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useAppDialog } from '../context/AppDialogContext';
 import { apiFetch, getBackendBase } from '../hooks/useBackend';
 import { EV_RELOAD_EDIT } from '../lib/pipelineImport';
 
 interface EditShot {
   id: number;
+  ep_number: number | null;
   order_index: number;
   clip_path: string | null;
   in_point: number;
@@ -17,6 +19,28 @@ interface Props { projectId: number }
 
 const FPS = 25;
 
+type EpisodeGroupKey = number | 'unset';
+
+function episodeKey(s: EditShot): EpisodeGroupKey {
+  if (s.ep_number != null && s.ep_number >= 1) return s.ep_number;
+  return 'unset';
+}
+
+function groupShotsByEpisode(rows: EditShot[]): [EpisodeGroupKey, EditShot[]][] {
+  const m = new Map<EpisodeGroupKey, EditShot[]>();
+  for (const s of rows) {
+    const k = episodeKey(s);
+    if (!m.has(k)) m.set(k, []);
+    m.get(k)!.push(s);
+  }
+  const keys = [...m.keys()].sort((a, b) => {
+    if (a === 'unset') return 1;
+    if (b === 'unset') return -1;
+    return (a as number) - (b as number);
+  });
+  return keys.map((k) => [k, m.get(k)!]);
+}
+
 function secToTC(sec: number): string {
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
@@ -26,6 +50,7 @@ function secToTC(sec: number): string {
 }
 
 export default function EditScriptTab({ projectId }: Props) {
+  const { confirm: appConfirm } = useAppDialog();
   const [shots, setShots] = useState<EditShot[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -72,6 +97,7 @@ export default function EditScriptTab({ projectId }: Props) {
   };
 
   const deleteShot = async (id: number) => {
+    if (!(await appConfirm({ title: '删除剪辑条', message: '确定删除该剪辑条吗？此操作不可恢复。', confirmLabel: '删除' }))) return;
     const base = await getBackendBase();
     await apiFetch(base, `/api/projects/${projectId}/edit-shots/${id}`, { method: 'DELETE' });
     setShots((prev) => prev.filter((s) => s.id !== id));
@@ -103,6 +129,8 @@ export default function EditScriptTab({ projectId }: Props) {
 
   const totalDuration = shots.reduce((acc, s) => acc + (s.out_point - s.in_point), 0);
 
+  const episodeGroups = useMemo(() => groupShotsByEpisode(shots), [shots]);
+
   return (
     <div className="edit-tab">
       <div className="edit-tab__head">
@@ -117,49 +145,68 @@ export default function EditScriptTab({ projectId }: Props) {
       {error && <div className="error">{error}</div>}
       {loading && <div className="tab-loading">加载中…</div>}
 
-      <div className="edit-table-wrap">
-        <table className="edit-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>时码</th>
-              <th>素材文件</th>
-              <th>入点 (s)</th>
-              <th>出点 (s)</th>
-              <th>时长 (s)</th>
-              <th>备注</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {shots.map((s) => (
-              <tr key={s.id}>
-                <td className="edit-table__num">{s.order_index + 1}</td>
-                <td className="edit-table__tc">{s.timecode}</td>
-                <td className="edit-table__clip">
-                  {s.clip_path ? (
-                    <span className="edit-table__clip-name" title={s.clip_path}>
-                      {s.clip_path.split(/[\\/]/).pop()}
-                    </span>
-                  ) : (
-                    <button className="btn-ghost btn-sm" onClick={() => void openFileForShot(s.id)}>选择文件</button>
-                  )}
-                </td>
-                <td>{s.in_point.toFixed(2)}</td>
-                <td>{s.out_point.toFixed(2)}</td>
-                <td>{(s.out_point - s.in_point).toFixed(2)}</td>
-                <td className="edit-table__note">{s.note}</td>
-                <td className="edit-table__actions">
-                  <button className="btn-ghost btn-sm" onClick={() => { setEditingId(s.id); setDraft({ ...s }); }}>编辑</button>
-                  <button className="btn-danger btn-sm" onClick={() => void deleteShot(s.id)}>×</button>
-                </td>
-              </tr>
-            ))}
-            {shots.length === 0 && !loading && (
-              <tr><td colSpan={8} className="edit-table__empty">暂无镜头，点击「添加镜头」</td></tr>
-            )}
-          </tbody>
-        </table>
+      <div className="edit-table-wrap edit-episode-stack">
+        {shots.length === 0 && !loading ? (
+          <div className="edit-table__empty">暂无镜头，点击「添加镜头」</div>
+        ) : (
+          episodeGroups.map(([ep, list]) => {
+            const epDur = list.reduce((acc, s) => acc + Math.max(0, s.out_point - s.in_point), 0);
+            const title = ep === 'unset' ? '未指定集数' : `第 ${ep} 集`;
+            return (
+              <details key={String(ep)} className="edit-episode-drawer" open>
+                <summary className="edit-episode-drawer__summary">
+                  <span className="edit-episode-drawer__title">{title}</span>
+                  <span className="edit-episode-drawer__meta">
+                    {list.length} 条 · 本集时长 {secToTC(epDur)}
+                  </span>
+                </summary>
+                <div className="edit-episode-drawer__body">
+                  <table className="edit-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>集</th>
+                        <th>时码</th>
+                        <th>素材文件</th>
+                        <th>入点 (s)</th>
+                        <th>出点 (s)</th>
+                        <th>时长 (s)</th>
+                        <th>备注</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {list.map((s, idx) => (
+                        <tr key={s.id}>
+                          <td className="edit-table__num">{idx + 1}</td>
+                          <td className="edit-table__num">{s.ep_number != null ? s.ep_number : '—'}</td>
+                          <td className="edit-table__tc">{s.timecode}</td>
+                          <td className="edit-table__clip">
+                            {s.clip_path ? (
+                              <span className="edit-table__clip-name" title={s.clip_path}>
+                                {s.clip_path.split(/[\\/]/).pop()}
+                              </span>
+                            ) : (
+                              <button type="button" className="btn-ghost btn-sm" onClick={() => void openFileForShot(s.id)}>选择文件</button>
+                            )}
+                          </td>
+                          <td>{s.in_point.toFixed(2)}</td>
+                          <td>{s.out_point.toFixed(2)}</td>
+                          <td>{(s.out_point - s.in_point).toFixed(2)}</td>
+                          <td className="edit-table__note">{s.note}</td>
+                          <td className="edit-table__actions">
+                            <button type="button" className="btn-ghost btn-sm" onClick={() => { setEditingId(s.id); setDraft({ ...s }); }}>编辑</button>
+                            <button type="button" className="btn-danger btn-sm" onClick={() => void deleteShot(s.id)}>×</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            );
+          })
+        )}
       </div>
 
       {editingId !== null && (

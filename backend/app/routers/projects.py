@@ -7,15 +7,19 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, delete, select
 
 from ..db import (
     Character,
     EditShot,
+    Episode,
+    GenerationJob,
     Project,
+    ProjectSnapshot,
     Scene,
     Script,
     StoryboardShot,
+    Timeline,
     get_session,
 )
 from ..paths import project_asset_dir, user_data_dir
@@ -83,21 +87,21 @@ def update_project(
 
 @router.delete("/{project_id}", status_code=204)
 def delete_project(project_id: int, session: Session = Depends(get_session)):
+    """用批量 DELETE，避免先把子表整行 SELECT 进 ORM（旧库缺少 ORM 新列时会 500）。"""
     _project_or_404(project_id, session)
-    # 子表有外键引用 project（及场景/分镜），需先删子行，避免约束失败或孤儿数据
-    for row in session.exec(select(EditShot).where(EditShot.project_id == project_id)).all():
-        session.delete(row)
-    for row in session.exec(select(StoryboardShot).where(StoryboardShot.project_id == project_id)).all():
-        session.delete(row)
-    for row in session.exec(select(Scene).where(Scene.project_id == project_id)).all():
-        session.delete(row)
-    for row in session.exec(select(Character).where(Character.project_id == project_id)).all():
-        session.delete(row)
-    for row in session.exec(select(Script).where(Script.project_id == project_id)).all():
-        session.delete(row)
-    proj = session.get(Project, project_id)
-    if proj:
-        session.delete(proj)
+    for model in (
+        EditShot,
+        StoryboardShot,
+        Scene,
+        Character,
+        Script,
+        Episode,
+        GenerationJob,
+        ProjectSnapshot,
+        Timeline,
+    ):
+        session.exec(delete(model).where(model.project_id == project_id))
+    session.exec(delete(Project).where(Project.id == project_id))
     session.commit()
 
     asset_dir = project_asset_dir(project_id)
@@ -107,6 +111,29 @@ def delete_project(project_id: int, session: Session = Depends(get_session)):
     memory_dir = user_data_dir() / "memory" / str(project_id)
     if memory_dir.exists():
         shutil.rmtree(memory_dir, ignore_errors=True)
+
+
+@router.post("/cleanup-orphans")
+def cleanup_orphan_records(session: Session = Depends(get_session)):
+    """清除所有已删除项目遗留的孤儿记录（同样用批量 DELETE，避免缺列的旧行无法载入 ORM）。"""
+    live_ids_list = list({p.id for p in session.exec(select(Project)).all()})
+    removed = 0
+    for model in (
+        EditShot,
+        StoryboardShot,
+        Scene,
+        Character,
+        Script,
+        Episode,
+        GenerationJob,
+        ProjectSnapshot,
+        Timeline,
+    ):
+        stmt = delete(model).where(~model.project_id.in_(live_ids_list)) if live_ids_list else delete(model)
+        res = session.execute(stmt)
+        removed += getattr(res, "rowcount", 0) or 0
+    session.commit()
+    return {"removed": removed}
 
 
 @router.post("/{project_id}/cover")

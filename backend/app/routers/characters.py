@@ -26,6 +26,8 @@ class CharacterUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     ai_prompt: Optional[str] = None
+    three_view_image_path: Optional[str] = None
+    three_view_status: Optional[str] = None
 
 
 def _char_or_404(char_id: int, project_id: int, session: Session) -> Character:
@@ -100,7 +102,8 @@ def upload_reference_image(
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
     paths = char.get_reference_images()
-    paths.append(str(dest))
+    # 新图作为「当前主参考」：插入队首；界面用大图绑的是 reference_images[0]，旧逻辑 append 会导致更换后仍显示旧图。
+    paths.insert(0, str(dest))
     char.set_reference_images(paths)
     char.updated_at = datetime.utcnow()
     session.add(char)

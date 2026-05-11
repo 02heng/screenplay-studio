@@ -86,6 +86,60 @@ def load_presets() -> list[ProviderPreset]:
     return list(merged.values())
 
 
+def ensure_user_providers_yaml() -> dict[str, Any]:
+    """若用户目录无 providers.yaml，则从 bundled 或 example 复制一份。"""
+    u = providers_file_user()
+    if u.is_file():
+        return _load_yaml(u)
+    u.parent.mkdir(parents=True, exist_ok=True)
+    for src in (providers_file_bundled(), providers_example()):
+        if src.is_file():
+            u.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            return _load_yaml(u)
+    data: dict[str, Any] = {"presets": []}
+    u.write_text(
+        yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    return data
+
+
+def update_user_preset(
+    preset_id: str,
+    *,
+    label: str,
+    base_url: str,
+    model: str,
+    api_key_env: str,
+) -> None:
+    """将预设字段写入用户数据目录下的 providers.yaml（并保留 extra_headers）。"""
+    data = ensure_user_providers_yaml()
+    items = data.get("presets")
+    if not isinstance(items, list):
+        items = []
+        data["presets"] = items
+    pid = preset_id.strip()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if str(it.get("id") or "").strip() != pid:
+            continue
+        it["label"] = (label or "").strip() or str(it.get("label") or pid)
+        bu = (base_url or "").strip().rstrip("/")
+        it["base_url"] = bu or str(it.get("base_url") or "https://api.openai.com/v1")
+        it["model"] = (model or "").strip() or str(it.get("model") or "gpt-4o-mini")
+        it["api_key_env"] = (api_key_env or "").strip()
+        if "extra_headers" not in it or not isinstance(it["extra_headers"], dict):
+            it["extra_headers"] = {}
+        path = providers_file_user()
+        path.write_text(
+            yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False),
+            encoding="utf-8",
+        )
+        return
+    raise ValueError(f"未找到预设 id「{pid}」。请先确认 providers.yaml 中存在该预设。")
+
+
 def resolve_api_key(preset: ProviderPreset) -> Optional[str]:
     import os
 

@@ -128,6 +128,8 @@ export default function ScriptTab({ projectId, projectType }: Props) {
   const abortRef = useRef<AbortController | null>(null);
   const novelFileRef = useRef<HTMLInputElement | null>(null);
   const autoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 服务端 persist_verify 已成功入库的阶段，flush 时跳过前端重复写入 */
+  const serverPersistedPhasesRef = useRef<Set<string>>(new Set());
 
   const [showLibrary, setShowLibrary] = useState(false);
   const [libNovels, setLibNovels] = useState<LibraryNovel[]>([]);
@@ -300,7 +302,8 @@ export default function ScriptTab({ projectId, projectType }: Props) {
     autoSaveRef.current = setTimeout(() => void saveContent(val, activeScript.id), 1500);
   };
 
-  const runJob = async () => {
+  /** 「续写」等场景必须传入覆盖值：setState 后立刻 runJob 时，闭包里的 epRangeStart 仍为旧状态，会导致 episode_range 未下发、分镜不导入。 */
+  const runJob = async (episodeRangeOverride?: { start: number; end: number }) => {
     if (!llmPresetId) { setError('请先在首页「设置」中配置模型预设与 API Key'); return; }
 
     const { logline, notes: notesFromIdea } = splitIdeaBlock(ideaBlock);
@@ -323,20 +326,34 @@ export default function ScriptTab({ projectId, projectType }: Props) {
 
     let rangeStart: number | undefined;
     let rangeEnd: number | undefined;
-    if (epRangeStart.trim()) {
-      rangeStart = parseInt(epRangeStart.trim(), 10);
+    if (episodeRangeOverride != null) {
+      rangeStart = episodeRangeOverride.start;
+      rangeEnd = episodeRangeOverride.end;
       if (!Number.isFinite(rangeStart) || rangeStart < 1) {
         setError('起始集数须为正整数'); return;
       }
-    }
-    if (epRangeEnd.trim()) {
-      rangeEnd = parseInt(epRangeEnd.trim(), 10);
       if (!Number.isFinite(rangeEnd) || rangeEnd < 1) {
         setError('结束集数须为正整数'); return;
       }
-    }
-    if (rangeStart && rangeEnd && rangeEnd < rangeStart) {
-      setError('结束集数不能小于起始集数'); return;
+      if (rangeEnd < rangeStart) {
+        setError('结束集数不能小于起始集数'); return;
+      }
+    } else {
+      if (epRangeStart.trim()) {
+        rangeStart = parseInt(epRangeStart.trim(), 10);
+        if (!Number.isFinite(rangeStart) || rangeStart < 1) {
+          setError('起始集数须为正整数'); return;
+        }
+      }
+      if (epRangeEnd.trim()) {
+        rangeEnd = parseInt(epRangeEnd.trim(), 10);
+        if (!Number.isFinite(rangeEnd) || rangeEnd < 1) {
+          setError('结束集数须为正整数'); return;
+        }
+      }
+      if (rangeStart && rangeEnd && rangeEnd < rangeStart) {
+        setError('结束集数不能小于起始集数'); return;
+      }
     }
 
     const base = await getBackendBase();
@@ -361,6 +378,7 @@ export default function ScriptTab({ projectId, projectType }: Props) {
     setPhase('');
     setStatus('生成中…');
     setError('');
+    serverPersistedPhasesRef.current.clear();
 
     const shouldImportSides = jobType === 'short_drama' || jobType === 'novel_adapt';
 
@@ -372,6 +390,28 @@ export default function ScriptTab({ projectId, projectType }: Props) {
     /** 小说改编逐集 SSE：当前流水线集号，用于分镜 CUT-xxx 等无 EP 时的导入归入 */
     let latestPipelineEpisode: number | undefined;
 
+    /** 服务端已写入 DB 或跳过前端导入时，仍需通知侧栏 Tab 重新拉取 API */
+    const dispatchSidebarReloadForPhase = (pid: string) => {
+      switch (pid) {
+        case 'characters':
+          window.dispatchEvent(new Event(EV_RELOAD_CHARACTERS));
+          break;
+        case 'storyboard':
+          window.dispatchEvent(new Event(EV_RELOAD_STORYBOARD));
+          break;
+        case 'edit_script':
+          window.dispatchEvent(new Event(EV_RELOAD_EDIT));
+          break;
+        case 'novel_screenplay':
+        case 'script_snippet':
+        case 'episode_scripts':
+          window.dispatchEvent(new Event(EV_RELOAD_EPISODES));
+          break;
+        default:
+          break;
+      }
+    };
+
     const flushCompletedPhase = async (phaseId: string | null, raw: string) => {
       if (!phaseId || !targetScriptId) return;
       try {
@@ -380,12 +420,31 @@ export default function ScriptTab({ projectId, projectType }: Props) {
         /* 保存失败仍尝试侧栏导入 */
       }
       if (!shouldImportSides || !raw.trim()) return;
+      const SERVER_DB_PHASES = new Set([
+        'characters',
+        'novel_screenplay',
+        'script_snippet',
+        'episode_scripts',
+        'storyboard',
+        'edit_script',
+      ]);
+      if (SERVER_DB_PHASES.has(phaseId) && serverPersistedPhasesRef.current.has(phaseId)) {
+        serverPersistedPhasesRef.current.delete(phaseId);
+        setEditor((p) => p + `\n✓「${phaseId}」服务端已校验并写入数据库，跳过前端重复导入（已刷新侧栏）\n`);
+        dispatchSidebarReloadForPhase(phaseId);
+        return;
+      }
       try {
         if (phaseId === 'characters') {
-          // importCharactersFromPhase is already name-deduplicated (additive by design)
-          const n = await importCharactersFromPhase(projectId, raw);
+          const n = await importCharactersFromPhase(projectId, raw, {
+            upsertExisting: isContinueMode,
+          });
           window.dispatchEvent(new Event(EV_RELOAD_CHARACTERS));
-          setEditor((p) => p + `\n✓ 已导入 ${n} 个角色到角色库${isContinueMode ? '（续写·增量）' : ''}\n`);
+          setEditor(
+            (p) =>
+              p +
+              `\n✓ 已同步 ${n} 条角色到角色库${isContinueMode ? '（续写：含新增与同名更新）' : ''}\n`,
+          );
         } else if (phaseId === 'storyboard') {
           const sbHint =
             jobType === 'novel_adapt' &&
@@ -509,6 +568,31 @@ export default function ScriptTab({ projectId, projectType }: Props) {
             setEditor((p) => p + line);
           }
 
+          if (obj.type === 'persist_verify') {
+            const pid = String(obj.phase_id || '');
+            const ok = obj.ok === true;
+            const applied = obj.applied === true;
+            const detail = String(obj.detail || '').slice(0, 280);
+            const icon = ok && applied ? '✓' : '⚠';
+            const tail = applied ? '（已写入数据库，侧栏将同步可见）' : '';
+            const line = `\n  ${icon} 入库校验「${pid}」${tail}${detail ? '：' + detail : ''}\n`;
+            fullText += line;
+            setEditor((p) => p + line);
+            if (applied && pid) {
+              serverPersistedPhasesRef.current.add(pid);
+              dispatchSidebarReloadForPhase(pid);
+            }
+          }
+
+          if (obj.type === 'character_export_verify') {
+            const pid = String(obj.phase_id || 'characters');
+            const ok = obj.ok === true;
+            const detail = String(obj.detail || '').slice(0, 240);
+            const line = `\n  ${ok ? '✓' : '⚠'} 角色 JSON 校验「${pid}」${detail ? '：' + detail : ''}\n`;
+            fullText += line;
+            setEditor((p) => p + line);
+          }
+
           if (obj.type === 'pulse') {
             const ch = Number(obj.chars) || 0;
             const kb = ch >= 1000 ? `${(ch / 1000).toFixed(1)}k` : `${ch}`;
@@ -536,7 +620,10 @@ export default function ScriptTab({ projectId, projectType }: Props) {
             const round = Number(obj.retry_round) || 1;
             const maxR = Number(obj.max_retry) || 1;
             const reason = String(obj.reason || '').slice(0, 120);
-            const line = `\n  🔁 导演要求重写「${String(obj.phase_id || '')}」（${round}/${maxR}）${reason ? '：' + reason : ''}\n`;
+            const persistFmt = obj.persist_format === true;
+            const characterJson = obj.character_json === true;
+            const label = persistFmt ? '入库/格式自愈' : characterJson ? '角色 JSON 自愈' : '导演要求重写';
+            const line = `\n  🔁 ${label}「${String(obj.phase_id || '')}」（${round}/${maxR}）${reason ? '：' + reason : ''}\n`;
             fullText += line;
             setEditor((p) => p + line);
             setStatus(`重写中（${round}/${maxR}）…`);
@@ -576,6 +663,13 @@ export default function ScriptTab({ projectId, projectType }: Props) {
             const timeHint = elapsed > 0 ? `（耗时 ${elapsed}s）` : '';
             const memHint = obj.memory_saved ? ' | 已同步记忆' : '';
             setStatus(`完成 ${timeHint}${memHint}`);
+            /* 兜底：任意阶段若漏发 reload，收尾统一刷新侧栏 Tab */
+            if (shouldImportSides && projectId) {
+              window.dispatchEvent(new Event(EV_RELOAD_CHARACTERS));
+              window.dispatchEvent(new Event(EV_RELOAD_STORYBOARD));
+              window.dispatchEvent(new Event(EV_RELOAD_EDIT));
+              window.dispatchEvent(new Event(EV_RELOAD_EPISODES));
+            }
           }
           if (obj.type === 'meta') {
             const pipelineLabel = obj.pipeline === 'multi_agent' ? '多智能体' : '线性';
@@ -589,7 +683,17 @@ export default function ScriptTab({ projectId, projectType }: Props) {
             const planHint = Array.isArray(obj.episode_plan) && obj.episode_plan.length >= 2
               ? ` | 规划集 ${obj.episode_plan[0]}–${obj.episode_plan[1]}`
               : '';
-            setStatus(`${pipelineLabel}流水线启动（共 ${Number(obj.phases_total) || '?'} 段${qg}${continueHint}${rangeHint}${memHint}${episodicHint}${planHint}）`);
+            const persistBrief =
+              obj.server_db_write_enabled === false && obj.post_pass_persist_verify
+                ? ' | ⚠未绑定项目：仅审稿，不入库'
+                : obj.director_quality_gate_enabled && obj.server_db_write_enabled && obj.post_pass_persist_verify
+                  ? ' | 每阶段：导演审稿→persist_verify→侧栏刷新'
+                  : '';
+            const novelContinueZh = typeof obj.novel_continue_same_gates_zh === 'string'
+              ? `\n　${obj.novel_continue_same_gates_zh}`
+              : '';
+            setEditor((p) => p + novelContinueZh);
+            setStatus(`${pipelineLabel}流水线启动（共 ${Number(obj.phases_total) || '?'} 段${qg}${continueHint}${rangeHint}${memHint}${episodicHint}${planHint}${persistBrief}）`);
           }
         }
       }
@@ -650,7 +754,7 @@ export default function ScriptTab({ projectId, projectType }: Props) {
       setEpRangeEnd(String(nextEnd));
       setStatus(`续写模式：第 ${nextStart}–${nextEnd} 集（从首个缺稿集起）`);
 
-      setTimeout(() => void runJob(), 100);
+      void runJob({ start: nextStart, end: nextEnd });
     } catch (e) {
       setError(`获取集数失败：${String((e as Error).message)}`);
     }

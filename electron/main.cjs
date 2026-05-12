@@ -10,6 +10,11 @@ const { startBackend, stopBackend, getBackendBaseUrl } = require('./backend.cjs'
 
 applyNonSystemDrivePaths(app);
 
+/** 与 package.json build.appId 一致；Win 任务栏/快捷方式需正确 AUMID，否则易出现默认 Electron 壳图标缓存 */
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.screenplaystudio.app');
+}
+
 /** 开发：仓库根；安装包：resources/（含 extraResources/backend） */
 function getProjectRoot() {
   return app.isPackaged ? process.resourcesPath : path.join(__dirname, '..');
@@ -18,6 +23,26 @@ function getProjectRoot() {
 const projectRoot = getProjectRoot();
 
 let mainWindow = null;
+
+function getBrowserWindowIcon() {
+  const names = ['icon.ico', 'icon.png'];
+  const candidates = [];
+
+  /** 开发 / 源码运行：仓库根/build */
+  const devRoot = path.join(__dirname, '..');
+  for (const n of names) candidates.push(path.join(devRoot, 'build', n));
+
+  /** electron-builder 打包：`app.asar.unpacked/build`（需在 package.json asarUnpack） */
+  if (app.isPackaged) {
+    const unpackedRoot = path.join(process.resourcesPath, 'app.asar.unpacked');
+    for (const n of names) candidates.push(path.join(unpackedRoot, 'build', n));
+  }
+
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return undefined;
+}
 
 function resolvePreferredDownloads(defaultBase) {
   try {
@@ -75,6 +100,7 @@ async function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 840,
+    icon: getBrowserWindowIcon(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,

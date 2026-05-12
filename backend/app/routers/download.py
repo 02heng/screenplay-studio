@@ -4,13 +4,11 @@
 """
 from __future__ import annotations
 
-import asyncio
-import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.downloader import database as db
@@ -38,10 +36,15 @@ def _inflight_task_for_url(url: str) -> Optional[dict]:
     return None
 
 
-def _enqueue_download(url: str) -> TaskStatus:
-    """创建并启动下载任务（调用方需已确认无同 URL 进行中任务）。"""
+def _enqueue_download(
+    url: str,
+    chapter_ids: Optional[list[int]] = None,
+    *,
+    catalog_only: bool = False,
+) -> TaskStatus:
+    """创建并启动后台任务。catalog_only 时仅解析目录入库；否则抓取正文。"""
     task_id = str(uuid.uuid4())
-    _tasks[task_id] = {
+    td: dict = {
         "task_id": task_id,
         "url": url,
         "status": "pending",
@@ -49,9 +52,16 @@ def _enqueue_download(url: str) -> TaskStatus:
         "progress": 0,
         "total_chapters": 0,
         "downloaded_chapters": 0,
+        "batch_total": 0,
+        "batch_done": 0,
         "book_id": None,
         "book_title": "",
     }
+    if chapter_ids is not None:
+        td["chapter_ids"] = chapter_ids
+    if catalog_only:
+        td["catalog_only"] = True
+    _tasks[task_id] = td
     _executor.submit(_run_download_task, task_id, url)
     t = _tasks[task_id]
     return TaskStatus(
@@ -61,6 +71,8 @@ def _enqueue_download(url: str) -> TaskStatus:
         progress=t["progress"],
         total_chapters=t["total_chapters"],
         downloaded_chapters=t["downloaded_chapters"],
+        batch_total=t.get("batch_total") or 0,
+        batch_done=t.get("batch_done") or 0,
         book_id=t.get("book_id"),
         book_title=t["book_title"],
     )
@@ -70,6 +82,12 @@ def _enqueue_download(url: str) -> TaskStatus:
 
 class DownloadRequest(BaseModel):
     url: str
+    # True：只解析书名与章节列表并入库，不写章节正文。
+    catalog_only: bool = False
+
+
+class ChapterIdsDownload(BaseModel):
+    chapter_ids: list[int]
 
 
 class TaskStatus(BaseModel):
@@ -79,6 +97,9 @@ class TaskStatus(BaseModel):
     progress: int = 0     # 0-100
     total_chapters: int = 0
     downloaded_chapters: int = 0
+    # 「下载所选」时为本批章节数及已完成数；为 0 表示按全书进度展示（下载全部未抓取等）
+    batch_total: int = 0
+    batch_done: int = 0
     book_id: Optional[int] = None
     book_title: str = ""
 
@@ -113,29 +134,88 @@ def _run_download_task(task_id: str, url: str) -> None:
             if info["chapters"]:
                 db.add_chapters(book_id, info["chapters"])
 
-        # Step 2: 获取章节列表
+        # Step 2: 载入章节列表与进度
         chapters = db.get_chapters(book_id, include_content=False)
-        pending = [c for c in chapters if not c.get("downloaded")]
         total = len(chapters)
-        already_done = total - len(pending)
+        already_done = sum(
+            1
+            for c in chapters
+            if c.get("downloaded") and not db.is_volume_toc_row(c.get("title", ""))
+        )
+        body_eligible_total = sum(
+            1 for c in chapters if not db.is_volume_toc_row(c.get("title", ""))
+        )
 
         task["total_chapters"] = total
         task["downloaded_chapters"] = already_done
-        task["progress"] = int(already_done / total * 100) if total else 0
+        task["progress"] = (
+            int(already_done / body_eligible_total * 100)
+            if body_eligible_total
+            else (100 if task.get("catalog_only") else 0)
+        )
+
+        if task.get("catalog_only"):
+            task["status"] = "done"
+            if total > 0:
+                task["message"] = (
+                    f"《{task['book_title']}》目录就绪（共 {total} 章），请勾选正文后下载"
+                )
+            else:
+                task["message"] = (
+                    f"《{task['book_title']}》已解析但未发现章节条目，请确认是否为书籍目录页链接"
+                )
+            return
+
+        pending_all = [
+            c
+            for c in chapters
+            if not c.get("downloaded")
+            and not db.is_volume_toc_row(c.get("title", ""))
+        ]
+        raw_ids = task.get("chapter_ids")
+        if raw_ids:
+            cid_set = {int(x) for x in raw_ids}
+            pending = [c for c in pending_all if c["id"] in cid_set]
+        else:
+            pending = pending_all
 
         if not pending:
             task["status"] = "done"
-            task["message"] = f"《{task['book_title']}》已全部下载完成（共 {total} 章）"
+            task["progress"] = 100
+            task["downloaded_chapters"] = already_done
+            if raw_ids:
+                task["message"] = (
+                    f"《{task['book_title']}》所选条目无需抓取（均已含正文或未选中未下载）；全书 {total} 章"
+                )
+            else:
+                task["message"] = f"《{task['book_title']}》已全部下载完成（共 {total} 章）"
             return
 
-        # Step 3: 下载章节内容
-        task["status"] = "downloading"
-        task["message"] = f"正在下载，共 {len(pending)} 章待下载..."
+        batch_n = len(pending)
 
-        # 判断是否需要浏览器（串行）
         from urllib.parse import urlparse
+
         first_domain = urlparse(pending[0]["url"]).netloc if pending else ""
         use_browser = first_domain in scraper._browser_domains
+
+        task["status"] = "downloading"
+        if raw_ids:
+            task["batch_total"] = batch_n
+            task["batch_done"] = 0
+            task["progress"] = 0 if batch_n else 100
+        else:
+            task["batch_total"] = 0
+            task["batch_done"] = 0
+
+        slow_hint = (
+            "（当前站点需浏览器渲染，单章可能需数十秒，请耐心等待）"
+            if use_browser
+            else ""
+        )
+        task["message"] = (
+            f"正在抓取 {batch_n} 章（{'所选章节' if raw_ids else '全部未下载'}）{slow_hint}…"
+        )
+
         max_workers_dl = 1 if use_browser else 6
 
         from concurrent.futures import ThreadPoolExecutor as DLPool, as_completed
@@ -156,12 +236,26 @@ def _run_download_task(task_id: str, url: str) -> None:
                 _, title = f.result()
                 done_count[0] += 1
                 task["downloaded_chapters"] = done_count[0]
-                task["progress"] = int(done_count[0] / total * 100) if total else 100
-                task["message"] = f"已下载 {done_count[0]}/{total}：{title}"
+                in_batch = done_count[0] - already_done
+                if raw_ids and batch_n > 0:
+                    task["batch_done"] = in_batch
+                    task["progress"] = int(in_batch / batch_n * 100)
+                else:
+                    task["progress"] = (
+                        int(done_count[0] / body_eligible_total * 100)
+                        if body_eligible_total
+                        else 100
+                    )
+                task["message"] = f"本批进度 {in_batch}/{batch_n}：{title}"
 
         task["status"] = "done"
-        task["message"] = f"《{task['book_title']}》下载完成（共 {total} 章）"
         task["progress"] = 100
+        if raw_ids and batch_n > 0:
+            task["batch_done"] = batch_n
+        if raw_ids:
+            task["message"] = f"《{task['book_title']}》本批所选已抓取完毕（全书 {total} 章）"
+        else:
+            task["message"] = f"《{task['book_title']}》下载完成（共 {total} 章）"
 
     except Exception as e:
         task["status"] = "error"
@@ -187,11 +281,66 @@ def start_download(payload: DownloadRequest) -> TaskStatus:
             progress=inflight.get("progress", 0),
             total_chapters=inflight.get("total_chapters", 0),
             downloaded_chapters=inflight.get("downloaded_chapters", 0),
+            batch_total=inflight.get("batch_total") or 0,
+            batch_done=inflight.get("batch_done") or 0,
             book_id=inflight.get("book_id"),
             book_title=inflight.get("book_title", ""),
         )
 
-    return _enqueue_download(url)
+    return _enqueue_download(url, catalog_only=payload.catalog_only)
+
+
+@router.post("/novel/{novel_id}/download-chapters", response_model=TaskStatus, status_code=202)
+def download_chapters_selection(novel_id: int, payload: ChapterIdsDownload) -> TaskStatus:
+    """仅下载勾选范围内的、且当前仍为「未抓取正文」的章节。"""
+    raw = payload.chapter_ids or []
+    if not raw:
+        raise HTTPException(status_code=400, detail="请至少选择一章后再下载")
+
+    seen: set[int] = set()
+    chapter_ids: list[int] = []
+    for x in raw:
+        try:
+            cid = int(x)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="chapter_ids 须为整数 id")
+        if cid not in seen:
+            seen.add(cid)
+            chapter_ids.append(cid)
+
+    book = db.get_book_by_id(novel_id)
+    if not book:
+        raise HTTPException(status_code=404, detail="小说不存在")
+    url = (book.get("url") or "").strip()
+    if not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="该书缺少有效目录链接")
+
+    rows = db.get_chapters(novel_id, include_content=False)
+    valid_ids = {int(r["id"]) for r in rows}
+    bad = [cid for cid in chapter_ids if cid not in valid_ids]
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=f"chapter_ids 含无效 id（非本书章节）：{bad[:8]}…" if len(bad) > 8 else "chapter_ids 含无效 id（非本书章节）",
+        )
+
+    inflight_existing = _inflight_task_for_url(url)
+    if inflight_existing:
+        tid = inflight_existing["task_id"]
+        return TaskStatus(
+            task_id=tid,
+            status=inflight_existing["status"],
+            message=inflight_existing.get("message", ""),
+            progress=inflight_existing.get("progress", 0),
+            total_chapters=inflight_existing.get("total_chapters", 0),
+            downloaded_chapters=inflight_existing.get("downloaded_chapters", 0),
+            batch_total=inflight_existing.get("batch_total") or 0,
+            batch_done=inflight_existing.get("batch_done") or 0,
+            book_id=inflight_existing.get("book_id"),
+            book_title=inflight_existing.get("book_title", ""),
+        )
+
+    return _enqueue_download(url, chapter_ids=chapter_ids)
 
 
 @router.post("/novel/{novel_id}/refetch-bodies", response_model=TaskStatus, status_code=202)
@@ -228,6 +377,8 @@ def get_task_status(task_id: str) -> TaskStatus:
         progress=t.get("progress", 0),
         total_chapters=t.get("total_chapters", 0),
         downloaded_chapters=t.get("downloaded_chapters", 0),
+        batch_total=t.get("batch_total") or 0,
+        batch_done=t.get("batch_done") or 0,
         book_id=t.get("book_id"),
         book_title=t.get("book_title", ""),
     )
@@ -258,6 +409,8 @@ def list_chapters(novel_id: int):
     if not book:
         raise HTTPException(status_code=404, detail="小说不存在")
     chapters = db.get_chapters(novel_id, include_content=False)
+    for row in chapters:
+        row["is_volume_header"] = db.is_volume_toc_row(row.get("title"))
     return {"novel": book, "chapters": chapters}
 
 

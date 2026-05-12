@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -187,27 +188,54 @@ def get_chapter(chapter_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def is_volume_toc_row(title: str | None) -> bool:
+    """
+    目录中的「第N卷」分段标题（且无「章/话/回」等小节标记）往往不是正文页，
+    抓下来的易成整目录或整页杂质，字数会失真。正文下载与书架统计均应跳过此类行。
+    """
+    if not title or not str(title).strip():
+        return False
+    t = str(title).strip()
+    for mark in ("章", "话", "回", "集"):
+        if mark in t:
+            return False
+    if "楔" in t or t.startswith("序"):
+        return False
+    return bool(
+        re.match(r"^第[一二三四五六七八九十百千万零〇两0-9]+卷", t)
+    )
+
+
 def get_book_chapter_count(book_id: int) -> tuple[int, int]:
-    """Return (total, downloaded)."""
+    """Return (总目录行数, 已抓取正文的章节数 — 不含分卷目录占位行)."""
     init_db()
     conn = get_conn()
     total = conn.execute(
         "SELECT COUNT(*) FROM chapters WHERE book_id = ?", (book_id,)
     ).fetchone()[0]
-    downloaded = conn.execute(
-        "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND downloaded = 1",
+    rows = conn.execute(
+        "SELECT title FROM chapters WHERE book_id = ? AND downloaded = 1",
         (book_id,),
-    ).fetchone()[0]
+    ).fetchall()
     conn.close()
-    return total, downloaded
+    downloaded_body = sum(
+        1 for r in rows if not is_volume_toc_row(r["title"])
+    )
+    return total, downloaded_body
 
 
 def get_book_content_char_count(book_id: int) -> int:
+    """已下载正文总字数（Unicode 字符数）；不含分卷目录行误入的正文噪声。"""
     init_db()
     conn = get_conn()
-    row = conn.execute(
-        "SELECT COALESCE(SUM(LENGTH(content)), 0) AS n FROM chapters WHERE book_id = ?",
+    rows = conn.execute(
+        "SELECT title, content FROM chapters WHERE book_id = ? AND downloaded = 1",
         (book_id,),
-    ).fetchone()
+    ).fetchall()
     conn.close()
-    return int(row["n"]) if row else 0
+    n = 0
+    for r in rows:
+        if is_volume_toc_row(r["title"]):
+            continue
+        n += len(r["content"] or "")
+    return n

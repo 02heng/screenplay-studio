@@ -87,6 +87,29 @@ function normalizeVideoUrls(shot: Shot): string[] {
   return [...fromVp];
 }
 
+/** 汇总单镜头画面、参数、台词与各类 AI 提示词，供一键复制到剪贴板 */
+function buildShotAllPromptsText(shot: Shot): string {
+  const chunks: string[] = [];
+  const push = (title: string, body: string | undefined) => {
+    const t = (body ?? '').trim();
+    if (t) chunks.push(`${title}\n${t}`);
+  };
+  push('画面', shot.shot_content);
+  push('景别', shot.shot_type ?? '');
+  push('运镜', shot.camera_movement ?? '');
+  push('导演意图', shot.director_intent);
+  push('动作', shot.action);
+  push('台词', shot.dialogue);
+  push('字幕', shot.subtitle_text);
+  push('摄影', shot.camera_params);
+  push('灯光', shot.lighting);
+  push('影调', shot.color_tone);
+  push('音效', shot.sound_design);
+  push('AI 图像提示词', shot.ai_prompt);
+  push('动效/视频提示词', shot.animation_prompt);
+  return chunks.join('\n\n');
+}
+
 function mediaSrc(p: string): string {
   return p.startsWith('http') ? p : `file://${p}`;
 }
@@ -1361,6 +1384,20 @@ export default function StoryboardTab({ projectId }: Props) {
                           )}
                         </div>
                         <div className="sbt-card__ops" onClick={(e) => e.stopPropagation()} role="group" aria-label="镜头操作">
+                          <button
+                            className="sbt__op-chip"
+                            type="button"
+                            title="一键复制所有提示词（画面、参数、台词、AI 等）"
+                            disabled={!buildShotAllPromptsText(shot)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const t = buildShotAllPromptsText(shot);
+                              if (t) copyPrompt(t);
+                            }}
+                          >
+                            <span className="sbt__op-chip__glyph" aria-hidden>⎘</span>
+                            <span>复制全部</span>
+                          </button>
                           <button
                             className="sbt__op-chip"
                             type="button"

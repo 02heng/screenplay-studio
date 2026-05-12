@@ -1,7 +1,7 @@
 {
   "name": "screenplay-studio",
   "version": "0.1.0",
-  "description": "剧本生成工作台 — Electron + FastAPI",
+  "description": "\u7535\u5f71\u3001\u77ed\u5267\u3001\u5267\u672c\u521b\u4f5c\u684c\u9762\u5e94\u7528 \u00b7 Electron + FastAPI",
   "author": "",
   "license": "MIT",
   "main": "electron/main.cjs",
@@ -12,9 +12,12 @@
     "backend": "cd backend && uvicorn app.main:app --reload --host 127.0.0.1 --port 18766",
     "prestart": "npm run build:renderer",
     "start": "electron .",
-    "build:renderer": "vite build",
-    "pack": "npm run build:renderer && node ./node_modules/electron-builder/cli.js --dir",
-    "dist": "npm run build:renderer && node ./node_modules/electron-builder/cli.js --publish never",
+    "icons": "node scripts/generate-brand-icons.mjs",
+    "build:renderer": "vite build --mode production",
+    "build:renderer:dev": "vite build --mode development",
+    "obfuscate:renderer:manual": "node scripts/obfuscate-renderer-dist.mjs",
+    "dist": "npm run icons && npm run build:renderer && node ./node_modules/electron-builder/cli.js --publish never",
+    "pack": "npm run icons && npm run build:renderer && node ./node_modules/electron-builder/cli.js --dir",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
@@ -25,8 +28,12 @@
     "cross-env": "^7.0.3",
     "electron": "^35.0.0",
     "electron-builder": "^26.0.0",
+    "javascript-obfuscator": "^4.2.2",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.34.5",
     "typescript": "^5.6.3",
     "vite": "^5.4.10",
+    "vite-plugin-bundle-obfuscator": "^1.12.0",
     "wait-on": "^8.0.1"
   },
   "dependencies": {
@@ -40,13 +47,22 @@
   "build": {
     "appId": "com.screenplaystudio.app",
     "productName": "Screenplay Studio",
-    "copyright": "Copyright © contributors",
+    "copyright": "Copyright Screenplay Studio contributors",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
+    "asar": true,
+    "asarUnpack": [
+      "build/icon.ico",
+      "build/icon.png"
+    ],
+    "icon": "icon.png",
     "files": [
       "electron/**/*.cjs",
       "renderer/dist/**/*",
+      "build/icon.ico",
+      "build/icon.png",
       "package.json"
     ],
     "extraResources": [
@@ -66,11 +82,14 @@
       "target": [
         "nsis"
       ],
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "icon": "icon.ico"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico"
     }
   }
 }

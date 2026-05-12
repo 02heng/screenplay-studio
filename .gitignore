@@ -1,7 +1,9 @@
-﻿# Dependencies / build artifacts
+# Dependencies / build artifacts
 node_modules/
 dist/
-build/
+/build/
+!/build/icon.ico
+!/build/icon.png
 *.pyc
 __pycache__/
 .venv/

@@ -146,17 +146,26 @@ function extractCharacterList(raw: string): unknown[] | null {
   }
 }
 
+function shotListFromStoryboardRecord(o: Record<string, unknown>): unknown[] | null {
+  for (const key of ['shots', 'storyboard', 'data'] as const) {
+    const inner = o[key];
+    if (Array.isArray(inner)) return inner;
+    if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+      const nested = shotListFromStoryboardRecord(inner as Record<string, unknown>);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
 function extractStoryboardShotList(raw: string): unknown[] | null {
   let arr = extractJsonArray(raw);
   if (arr && arr.length > 0) return arr;
 
   const o = extractJsonObject(raw);
   if (!o) return null;
-  if (Array.isArray(o.shots)) return o.shots;
-  const inner = o.storyboard;
-  if (Array.isArray(inner)) return inner;
-  const inner2 = o.data;
-  if (Array.isArray(inner2)) return inner2;
+  const fromKeys = shotListFromStoryboardRecord(o);
+  if (fromKeys) return fromKeys;
   return null;
 }
 
@@ -213,24 +222,37 @@ function pickCharacterImagePrompt(row: Record<string, unknown>): string {
   return asCharacterThreeViewPrompt(bits.join('；'));
 }
 
-/** 将 characters 阶段输出导入为项目角色（按名称去重） */
-export async function importCharactersFromPhase(projectId: number, raw: string): Promise<number> {
+export type ImportCharactersOpts = {
+  /** 续写：同名角色更新描述与 AI 提示词（PATCH）；新名称仍 POST */
+  upsertExisting?: boolean;
+};
+
+/** 将 characters 阶段输出导入为项目角色；默认跳过已存在的名称；续写时可 upsert */
+export async function importCharactersFromPhase(
+  projectId: number,
+  raw: string,
+  opts?: ImportCharactersOpts,
+): Promise<number> {
   const list = extractCharacterList(raw);
   if (!list || list.length === 0) return 0;
 
+  const upsert = opts?.upsertExisting === true;
+
   const base = await getBackendBase();
-  const existing = await apiFetch<{ characters: { name: string }[] }>(
+  const existing = await apiFetch<{ characters: { id: number; name: string }[] }>(
     base,
     `/api/projects/${projectId}/characters`
   );
-  const names = new Set((existing.characters || []).map((c) => c.name));
+  const rows = existing.characters || [];
+  const names = new Set(rows.map((c) => c.name));
+  const nameToId = new Map(rows.map((c) => [c.name, c.id]));
 
-  let added = 0;
+  let changed = 0;
   for (const c of list) {
     if (!c || typeof c !== 'object') continue;
     const row = c as Record<string, unknown>;
     const name = str(row.name);
-    if (!name || names.has(name)) continue;
+    if (!name) continue;
 
     const parts = [
       str(row.identity) && `身份：${str(row.identity)}`,
@@ -248,19 +270,33 @@ export async function importCharactersFromPhase(projectId: number, raw: string):
     if (sigLine) parts.push(`台词风格示例：${sigLine}`);
 
     const descCore = parts.join('\n') || str(row.role) || '（由流水线导入）';
+    const aiPrompt = pickCharacterImagePrompt(row);
 
-    await apiFetch(base, `/api/projects/${projectId}/characters`, {
+    const existingId = nameToId.get(name);
+    if (existingId != null && upsert) {
+      await apiFetch(base, `/api/projects/${projectId}/characters/${existingId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ description: descCore, ai_prompt: aiPrompt }),
+      });
+      changed += 1;
+      continue;
+    }
+
+    if (names.has(name)) continue;
+
+    const created = await apiFetch<{ id: number }>(base, `/api/projects/${projectId}/characters`, {
       method: 'POST',
       body: JSON.stringify({
         name,
         description: descCore,
-        ai_prompt: pickCharacterImagePrompt(row),
+        ai_prompt: aiPrompt,
       }),
     });
     names.add(name);
-    added += 1;
+    if (created?.id != null) nameToId.set(name, created.id);
+    changed += 1;
   }
-  return added;
+  return changed;
 }
 
 interface SceneDto {

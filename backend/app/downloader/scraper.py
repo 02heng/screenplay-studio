@@ -419,6 +419,85 @@ AD_CHILD_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# 网文章节绝大多数短于该阈值；超长多为误合并分页/侧栏整块正文，触发「仅用首页」重试
+MAX_CHAPTER_BODY_CHARS = 15000
+
+READER_TITLE_SELECTORS = (
+    "#title",
+    ".chapter-title",
+    "#chapter_title",
+    "#chapterTitle",
+    "h2.title",
+    ".bookname h1",
+    ".bookname",
+    ".reader_title",
+    ".content_title",
+    ".novel_title",
+    "div.title",
+)
+
+
+def _normalize_chapter_heading_for_compare(title: str) -> str:
+    """去空白后比对：同章多页的题目应一致，不一致则不应合并正文。"""
+    if not title or not title.strip():
+        return ""
+    return re.sub(r"\s+", "", title.strip())
+
+
+def _strip_site_noise_from_heading(t: str) -> str:
+    """阅读页常见于「章名 - 书名 - 网站名」，取第一段作章标题。"""
+    x = (t or "").strip()
+    if not x:
+        return ""
+    parts = re.split(r"\s*[|｜_/\\‐－—:：]\s*", x)
+    if parts:
+        first = parts[0].strip()
+        if len(first) >= 2:
+            return first
+    return x
+
+
+def _extract_reader_chapter_title(soup: BeautifulSoup) -> str:
+    """
+    从阅读页抓取当前章标题（尽量与分页下一页同属一章时一致）。
+    若站点无单独标题节点则返回空字符串，分页合并时不做题目拦截。
+    """
+    for sel in READER_TITLE_SELECTORS:
+        el = soup.select_one(sel)
+        if el:
+            raw = el.get_text(strip=True)
+            cand = _strip_site_noise_from_heading(raw)
+            if 2 <= len(cand) < 260:
+                return cand
+    h1 = soup.find("h1")
+    if h1:
+        cand = _strip_site_noise_from_heading(h1.get_text(strip=True))
+        if len(cand) >= 2:
+            return cand
+    tt = soup.find("title")
+    if tt:
+        cand = _strip_site_noise_from_heading(tt.get_text(strip=True))
+        if len(cand) >= 2:
+            return cand
+    return ""
+
+
+def _headings_conflict_for_merge(base_title: str, page_title: str) -> bool:
+    a = _normalize_chapter_heading_for_compare(base_title)
+    b = _normalize_chapter_heading_for_compare(page_title)
+    if not a or not b:
+        return False
+    return a != b
+
+
+def _first_page_body_only(url: str) -> str:
+    """不跟分页链接，仅用当前章节 URL 单页正文（用于超限重试）。"""
+    html = _get_html(url)
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "lxml")
+    return _extract_content_from_soup(soup)
+
 
 def _is_fanqie_novel_domain(url: str) -> bool:
     host = urlparse(url).netloc.lower()
@@ -681,18 +760,48 @@ def _extract_content_from_soup(soup: BeautifulSoup) -> str:
 
 
 def _find_next_page_url(soup: BeautifulSoup, current_url: str) -> Optional[str]:
+    """
+    只跟随**同章分页**（下一页 / 下页），不得匹配「下一章」等目录翻章链接。
+
+    原先用 `"下一" in text` 会误伤：「下一章」含「下一」，导致把相邻章节全文拼进当前章，
+    笔趣阁类模板站点（含 xhytd.com）常因此出现「一章几万字」。
+    """
+    best: Optional[str] = None
+    best_rank = 99
     for a in soup.find_all("a", href=True):
-        text = a.get_text(strip=True)
-        href = a.get("href", "")
-        if ("下一" in text or "下页" in text) and href:
-            full = urljoin(current_url, href)
-            if full != current_url:
-                return full
-    return None
+        raw_text = a.get_text(strip=True) or ""
+        text = raw_text.replace(" ", "").replace("　", "")
+        href = (a.get("href") or "").strip()
+        if not href or href.startswith("javascript"):
+            continue
+        if re.search(r"下一章|上一章|下\s*一章|上\s*一章", text):
+            continue
+        if "下一节" in text or "上一节" in text:
+            continue
+        full = urljoin(current_url, href)
+        if full == current_url:
+            continue
+        rank: Optional[int] = None
+        if "下一页" in text or "下一頁" in text:
+            rank = 0
+        elif "下页" in text:
+            rank = 1
+        if rank is None:
+            continue
+        if rank < best_rank:
+            best_rank = rank
+            best = full
+            if rank == 0:
+                break
+    return best
 
 
 def parse_chapter_content(url: str) -> str:
-    """解析单章正文，自动处理分页，返回合并后的纯文本"""
+    """
+    解析单章正文：同章多页仅合并「下一页」分页；若后续页章节标题与首页不一致则停止合并（防串章）。
+    合并结果超过约 1.5 万字时，会再仅拉当前 URL 单页（关分页）做一次「重拉」以排除误合并；
+    若单页仍超长则保留偏长结果（极少数真·长章或侧栏污染）。
+    """
     html = _get_html(url)
     if not html:
         return ""
@@ -709,15 +818,16 @@ def parse_chapter_content(url: str) -> str:
             print(f"[scraper] 番茄正文解密失败: {e}")
 
     soup = BeautifulSoup(html, "lxml")
+    base_title = _extract_reader_chapter_title(soup)
+    next_url = _find_next_page_url(soup, url)
     content = _extract_content_from_soup(soup)
-    all_contents = [content] if content else []
+    all_contents: list[str] = [content] if content else []
 
     if _is_qimao_chapter_url(url):
         merged = "\n".join(c for c in all_contents if c)
         return _clean_text(merged)
 
-    next_url = _find_next_page_url(soup, url)
-    visited = {url}
+    visited: set[str] = {url}
     while next_url and next_url not in visited:
         visited.add(next_url)
         try:
@@ -725,6 +835,9 @@ def parse_chapter_content(url: str) -> str:
             if not page_html:
                 break
             page_soup = BeautifulSoup(page_html, "lxml")
+            page_title = _extract_reader_chapter_title(page_soup)
+            if _headings_conflict_for_merge(base_title, page_title):
+                break
             page_content = _extract_content_from_soup(page_soup)
             if page_content:
                 all_contents.append(page_content)
@@ -733,7 +846,17 @@ def parse_chapter_content(url: str) -> str:
             break
 
     merged = "\n".join(c for c in all_contents if c)
-    return _clean_text(merged)
+    out = _clean_text(merged)
+    if len(out) <= MAX_CHAPTER_BODY_CHARS:
+        return out
+    retry = _clean_text(_first_page_body_only(url))
+    if not retry:
+        return out
+    if len(retry) <= MAX_CHAPTER_BODY_CHARS:
+        return retry
+    if len(retry) < len(out):
+        return retry
+    return out
 
 
 def scrape_chapters_batch(

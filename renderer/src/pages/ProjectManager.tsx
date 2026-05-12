@@ -52,7 +52,7 @@ export default function ProjectManager() {
       <header className="pm-header">
         <div className="pm-header__inner">
           <div className="pm-header__brand">
-            <span className="pm-logo">SS</span>
+            <img className="pm-logo" src={`${import.meta.env.BASE_URL}logo.png`} width={42} height={42} alt="" />
             <div>
               <h1 className="pm-title">Screenplay Studio</h1>
               <p className="pm-subtitle">电影 · 短剧 · 完整制作流程</p>

@@ -151,6 +151,13 @@ export default function ProjectWorkspace() {
     <div className="ws-root">
       {/* ── 顶栏 ── */}
       <header className="ws-topbar">
+        <img
+          className="ws-topbar__logo"
+          src={`${import.meta.env.BASE_URL}logo.png`}
+          width={32}
+          height={32}
+          alt=""
+        />
         <button className="ws-back" onClick={() => navigate('/')} title="返回项目列表">
           ‹ 项目
         </button>

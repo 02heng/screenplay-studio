@@ -66,6 +66,21 @@ def _slice_balanced_json_array(payload: str, start: int) -> str | None:
     return None
 
 
+def _shot_list_from_storyboard_obj(d: object) -> list | None:
+    """常见误格式：{\"storyboard\": {\"shots\": [...]}} — 单层 storyboard/shots/data 已为列表时直接返回。"""
+    if not isinstance(d, dict):
+        return None
+    for key in ("shots", "storyboard", "data"):
+        inner = d.get(key)
+        if isinstance(inner, list):
+            return inner
+        if isinstance(inner, dict):
+            nested = _shot_list_from_storyboard_obj(inner)
+            if nested is not None:
+                return nested
+    return None
+
+
 def parse_storyboard_shot_list(text: str) -> list | None:
     """从模型输出中提取分镜镜头数组（顶层数组或 { shots / storyboard / data }）。
     避免 find('[')…rfind(']') 截断多块数组或内含 ] 的字符串时解析失败。
@@ -76,10 +91,9 @@ def parse_storyboard_shot_list(text: str) -> list | None:
         if isinstance(v, list):
             return v
         if isinstance(v, dict):
-            for key in ("shots", "storyboard", "data"):
-                inner = v.get(key)
-                if isinstance(inner, list):
-                    return inner
+            got = _shot_list_from_storyboard_obj(v)
+            if got is not None:
+                return got
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 

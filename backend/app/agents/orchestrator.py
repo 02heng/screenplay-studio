@@ -18,6 +18,7 @@ Execution flow (short_drama):
   8. Director reviews storyboard
   9. Editor: edit_script
   10. Director reviews edit_script
+  11. After each PASS（剧本/分镜/剪辑）：服务端入库校验 persist_verify；失败则「仅格式」自愈重试
 
 Execution flow (novel_adapt):
   1. Screenwriter: digest → Director reviews digest
@@ -28,6 +29,11 @@ Execution flow (novel_adapt):
      Storyboard: storyboard → Director
      Editor: edit_script → Director
   5. Editor: production_checklist（全剧汇总）
+  6. 上述「剧本→分镜→剪辑」每阶段在导演 PASS 后执行 persist_verify 入库与格式自愈（若绑定 project_id）
+
+**续写（episode_range_start > 1）** 在完成一轮 characters 之后，对上述第 4 步 **逐集循环沿用同一 `_run_agent_phases` 路径**：
+导演审查 screenplay / storyboard / edit_script 的 JSON／正文，
+PASS 后与冷启动相同的 `persist_verify` + 角色 JSON 门控入库；并未跳过数据库校验。
 
 Each agent gets an independent context window — only handoff packets / summaries
 of prior phases, not the full raw text — preventing context overflow.
@@ -39,8 +45,13 @@ import json
 import time
 from typing import Iterator
 
+from sqlmodel import Session
+
+from ..db import engine
 from ..llm.presets import ProviderPreset
+from ..pipelines.character_export_parse import parse_character_export
 from ..pipelines.episode_range_clip import STORYBOARD_MAX_SHOTS
+from ..services.phase_project_persist import PERSIST_GATE_PHASES, persist_phase_after_director_pass
 from .base import BaseAgent
 from .context import (
     AgentContext, AgentRole, AGENT_LABELS,
@@ -67,6 +78,12 @@ _REVIEW_GATES = {
 
 # 分镜单响应超 STORYBOARD_MAX_SHOTS 条时，额外再生成（不占用导演 REVISE 重试配额）
 STORYBOARD_OVERCAP_REGEN_ATTEMPTS = 1
+
+# 导演 PASS 后入库失败时，「仅修正格式」的最大额外重试次数（不经过导演再审）
+FORMAT_PERSIST_MAX_RETRIES = 2
+
+# characters：导演通过后 JSON 仍无法入库时的自愈重试（不占用导演 REVISE 配额）
+CHARACTER_JSON_MAX_RETRIES = 2
 
 
 def _parse_adapt_outline_episode_count(text: str) -> int | None:
@@ -144,6 +161,15 @@ class Orchestrator:
         self._total_phases = 0
         self._done_phases = 0
 
+    def _sse_meta_quality_contract(self) -> dict[str, object]:
+        """SSE「meta」中声明：导演门控 / 通过后入库校验 / 是否与项目绑定写库。"""
+        ctx = self.ctx
+        return {
+            "director_quality_gate_enabled": bool(self.enable_review),
+            "post_pass_persist_verify": True,
+            "server_db_write_enabled": ctx.project_id is not None,
+        }
+
     def _emit(self, obj: dict) -> str:
         return json.dumps(obj, ensure_ascii=False) + "\n"
 
@@ -220,7 +246,12 @@ class Orchestrator:
         return lo, hi
 
     def _run_novel_adapt_episodic(self) -> Iterator[str]:
-        """novel_adapt：大纲前置后按集循环「剧本→分镜→剪辑」，最后制作清单。"""
+        """novel_adapt：大纲前置后按集循环「剧本→分镜→剪辑」，最后制作清单。
+
+        续写模式（episode_range_start>1）：在每批逐集循环**之前**先跑一轮 characters（增量人物表），再进入各集 screenplay→storyboard→edit。
+        「续写」与冷启动在完成 digest/adapt_outline 之后的**逐集三相**完全一致：`_run_agent_phases`、导演审稿、PASS 后的 persist_verify /
+        characters JSON 校验（均由 `AgentContext.project_id` 决定是否写库）。
+        """
         ctx = self.ctx
         is_continue = self._is_continue_mode()
         agents_seen = ["screenwriter", "character", "editor", "storyboard"]
@@ -230,7 +261,7 @@ class Orchestrator:
             if hi < lo:
                 raise RuntimeError("续写需要提供合法的集数范围（起始≤结束）")
             n_ep = hi - lo + 1
-            self._total_phases = n_ep * 3 + 1
+            self._total_phases = n_ep * 3 + 2
             self._done_phases = 0
 
             yield self._emit({
@@ -245,9 +276,16 @@ class Orchestrator:
                 "episode_range": [lo, hi],
                 "novel_episodic": True,
                 "has_memory": bool(ctx.memory_context),
+                **self._sse_meta_quality_contract(),
+                "novel_continue_same_gates_zh": (
+                    "续写：characters + 逐集 screenplay/storyboard/edit_script "
+                    "均经导演审稿，通过后 persist_verify 入库（绑定项目时）；侧栏由各阶段事件刷新。"
+                ),
             })
 
             orig_rs, orig_re = ctx.episode_range_start, ctx.episode_range_end
+
+            yield from self._run_agent_phases(self.character, {"characters"})
 
             for ep in range(lo, hi + 1):
                 yield self._emit({
@@ -294,6 +332,7 @@ class Orchestrator:
             ),
             "novel_episodic": True,
             "has_memory": bool(ctx.memory_context),
+            **self._sse_meta_quality_contract(),
         })
 
         yield from self._run_agent_phases(self.screenwriter, {"digest"})
@@ -315,6 +354,7 @@ class Orchestrator:
             "agents": agents_seen,
             "episode_plan": [lo, hi],
             "novel_episodic": True,
+            **self._sse_meta_quality_contract(),
         })
 
         orig_rs, orig_re = ctx.episode_range_start, ctx.episode_range_end
@@ -376,6 +416,7 @@ class Orchestrator:
                 if ctx.episode_range_start else None
             ),
             "has_memory": bool(ctx.memory_context),
+            **self._sse_meta_quality_contract(),
         })
 
         for step in steps:
@@ -399,12 +440,150 @@ class Orchestrator:
             "memory_saved": memory_saved,
         })
 
+    def _run_character_export_gate(
+        self,
+        agent: BaseAgent,
+        phase_id: str,
+        system: str,
+        tmpl: str,
+    ) -> Iterator[str]:
+        """导演通过后：校验 characters JSON 可入库；失败则仅「格式自愈」重生成。"""
+        if phase_id != "characters":
+            return
+        result = self.ctx.results.get(phase_id)
+        if not result or not result.text.strip():
+            yield self._emit({
+                "type": "character_export_verify",
+                "phase_id": phase_id,
+                "ok": False,
+                "detail": "无阶段文本",
+            })
+            return
+
+        hint_intro = (
+            "\n\n【系统强制 · JSON 校验失败】导演已通过，但工作台仍无法解析你的角色输出。"
+            "请输出**单一合法 JSON**（可包在 ```json 围栏内），顶层须有键 \"characters\" 为非空数组；"
+            "每项须有非空 \"name\"。**仅修正格式与字段类型，勿删改已有角色的设定语义**。\n\n【解析错误】\n"
+        )
+
+        while True:
+            txt = self.ctx.results[phase_id].text
+            rows, err = parse_character_export(txt)
+            yield self._emit({
+                "type": "character_export_verify",
+                "phase_id": phase_id,
+                "ok": rows is not None and len(rows) > 0,
+                "detail": "JSON 结构校验通过" if rows else err,
+                "character_retry": result.character_json_retries,
+            })
+            if rows:
+                return
+
+            result.character_json_retries += 1
+            if result.character_json_retries > CHARACTER_JSON_MAX_RETRIES:
+                yield self._emit({
+                    "type": "character_export_verify",
+                    "phase_id": phase_id,
+                    "ok": False,
+                    "detail": err + f"（已达 JSON 自愈上限 {CHARACTER_JSON_MAX_RETRIES}）",
+                    "fallback_raw_import": True,
+                })
+                return
+
+            yield self._emit({
+                "type": "retry",
+                "agent": agent.role.value,
+                "phase_id": phase_id,
+                "retry_round": result.character_json_retries,
+                "max_retry": CHARACTER_JSON_MAX_RETRIES,
+                "reason": f"角色 JSON：{err[:160]}",
+                "character_json": True,
+            })
+            suffix = hint_intro + err
+            yield from self._run_single_phase(agent, phase_id, system, tmpl, extra_user_suffix=suffix)
+
+    def _run_format_persist_gate(
+        self,
+        agent: BaseAgent,
+        phase_id: str,
+        system: str,
+        tmpl: str,
+    ) -> Iterator[str]:
+        """导演通过后：写入项目库并校验；失败则触发仅「格式自愈」的重生成。"""
+        result = self.ctx.results.get(phase_id)
+        if not result or not result.text.strip():
+            yield self._emit({
+                "type": "persist_verify",
+                "phase_id": phase_id,
+                "ok": False,
+                "applied": False,
+                "detail": "无阶段文本，跳过入库",
+                "counts": {},
+            })
+            return
+
+        fmt_hint_intro = (
+            "\n\n【系统强制 · 入库校验未通过】工作台无法将你的上一版输出安全写入数据库。"
+            "请**只修正 JSON 结构 / Markdown 代码围栏 / 引号转义 / 尾随逗号 / 字段类型（如数字写成了带引号的字符串）**；"
+            "**不得改变剧情、对白、镜头含义与时长设定**。\n\n【校验详情】\n"
+        )
+
+        while True:
+            txt = self.ctx.results[phase_id].text
+            with Session(engine()) as session:
+                rep = persist_phase_after_director_pass(
+                    session,
+                    project_id=self.ctx.project_id,
+                    phase_id=phase_id,
+                    text=txt,
+                    episode_range_start=self.ctx.episode_range_start,
+                    episode_range_end=self.ctx.episode_range_end,
+                )
+            yield self._emit({
+                "type": "persist_verify",
+                "phase_id": phase_id,
+                "ok": rep.ok,
+                "applied": rep.ok,
+                "detail": rep.detail,
+                "counts": rep.counts,
+                "format_retry": result.format_persist_retries,
+            })
+            if rep.ok:
+                return
+
+            result.format_persist_retries += 1
+            if result.format_persist_retries > FORMAT_PERSIST_MAX_RETRIES:
+                yield self._emit({
+                    "type": "persist_verify",
+                    "phase_id": phase_id,
+                    "ok": False,
+                    "applied": False,
+                    "detail": rep.detail + f"（已达格式自愈上限 {FORMAT_PERSIST_MAX_RETRIES}，改由前端尝试导入）",
+                    "counts": rep.counts,
+                    "format_retry": result.format_persist_retries,
+                    "fallback_client_import": True,
+                })
+                return
+
+            yield self._emit({
+                "type": "retry",
+                "agent": agent.role.value,
+                "phase_id": phase_id,
+                "retry_round": result.format_persist_retries,
+                "max_retry": FORMAT_PERSIST_MAX_RETRIES,
+                "reason": f"入库/格式校验：{rep.detail[:180]}",
+                "persist_format": True,
+            })
+            suffix = fmt_hint_intro + rep.detail[:2500]
+            yield from self._run_single_phase(agent, phase_id, system, tmpl, extra_user_suffix=suffix)
+
     def _run_single_phase(
         self,
         agent: BaseAgent,
         phase_id: str,
         system: str,
         tmpl: str,
+        extra_user_suffix: str = "",
     ) -> Iterator[str]:
         """Run one phase of an agent, yielding SSE delta events."""
         from ..llm.client import stream_chat
@@ -412,12 +591,12 @@ class Orchestrator:
         prior = self.ctx.build_prior_for(agent.role, phase_id=phase_id)
 
         # Inject director feedback for revision rounds
-        result = self.ctx.results.get(phase_id)
+        prev = self.ctx.results.get(phase_id)
         revision_hint = ""
-        if result and result.revision_needed and result.director_feedback:
+        if prev and prev.revision_needed and prev.director_feedback:
             revision_hint = (
-                f"\n\n【导演修改要求（第{result.retry_count}轮）】\n"
-                f"{result.director_feedback[:6000]}\n"
+                f"\n\n【导演修改要求（第{prev.retry_count}轮）】\n"
+                f"{prev.director_feedback[:6000]}\n"
                 f"请根据以上反馈修改你的输出。\n"
             )
 
@@ -439,6 +618,8 @@ class Orchestrator:
         )
         if revision_hint:
             user += revision_hint
+        if extra_user_suffix:
+            user += extra_user_suffix
 
         chunks: list[str] = []
 
@@ -474,13 +655,17 @@ class Orchestrator:
 
         yield from yield_llm_stream(user)
         text = "".join(chunks).strip()
-        retry_count = result.retry_count if result else 0
+        retry_count = prev.retry_count if prev else 0
+        fp_retries = getattr(prev, "format_persist_retries", 0) if prev else 0
+        cj_retries = getattr(prev, "character_json_retries", 0) if prev else 0
         new_result = PhaseResult(
             phase_id=phase_id,
             agent=agent.role,
             text=text,
             retry_count=retry_count,
         )
+        new_result.format_persist_retries = fp_retries
+        new_result.character_json_retries = cj_retries
         self.ctx.add_result(new_result)
         agent.post_phase(phase_id, text, self.ctx)
         pr = self.ctx.results[phase_id]
@@ -576,6 +761,12 @@ class Orchestrator:
                     })
 
                     yield from self._run_single_phase(agent, phase_id, system, tmpl)
+
+            if phase_id == "characters":
+                yield from self._run_character_export_gate(agent, phase_id, system, tmpl)
+
+            if self.ctx.project_id and phase_id in PERSIST_GATE_PHASES:
+                yield from self._run_format_persist_gate(agent, phase_id, system, tmpl)
 
             # --- Generate handoff packet for next agent ---
             self._generate_handoff(agent.role, phase_id)

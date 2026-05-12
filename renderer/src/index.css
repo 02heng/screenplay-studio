@@ -808,6 +808,38 @@ button:disabled {
 }
 .modal--wide { width: 620px; }
 
+.modal--chapter-preview {
+  width: min(720px, 94vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.chapter-preview-meta {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+  margin: -8px 0 14px;
+}
+.chapter-preview-meta strong {
+  color: var(--text);
+}
+.chapter-preview-scroll {
+  flex: 1;
+  min-height: 140px;
+  max-height: min(52vh, 560px);
+  overflow-y: auto;
+  padding: 14px 16px;
+  margin: 0 -16px;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(240, 236, 230, 0.06);
+  font-size: 14px;
+  line-height: 1.68;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .modal__title {
   font: 600 20px var(--font-display);
   color: var(--text);
@@ -972,12 +1004,9 @@ button:disabled {
 .pm-logo {
   width: 42px;
   height: 42px;
-  background: var(--accent-line);
   border-radius: var(--radius-sm);
-  display: grid;
-  place-items: center;
-  font: 700 15px var(--font-display);
-  color: #1a1209;
+  flex-shrink: 0;
+  object-fit: cover;
 }
 .pm-title { font: 700 22px var(--font-display); margin: 0; letter-spacing: .02em; }
 .pm-subtitle { font-size: 12px; color: var(--muted); margin: 2px 0 0; }
@@ -1111,6 +1140,11 @@ button:disabled {
   border-bottom: 1px solid var(--border);
   background: var(--bg-mid);
   min-height: 52px;
+}
+.ws-topbar__logo {
+  border-radius: 6px;
+  flex-shrink: 0;
+  object-fit: cover;
 }
 .ws-back {
   background: transparent;
@@ -3031,73 +3065,63 @@ input.drama-taxonomy__episode-count {
   color: var(--danger);
 }
 
-/* ── 任务状态区 ───────────────────────────────────────── */
-.download-tasks {
-  flex-shrink: 0;
-  padding: 16px 28px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-1);
-}
-
-.section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin: 0 0 10px;
-}
-
-.task-card {
+/* ── 下载任务轻提示（底部 Toast，完成/失败约 2 秒消失）────────── */
+.download-task-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 950;
+  min-width: min(420px, calc(100vw - 40px));
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 12px 16px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
   background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 10px 14px;
+  box-shadow: var(--shadow-soft);
+  pointer-events: none;
+}
+.download-task-toast--progress {
+  border-color: rgba(124, 158, 255, 0.35);
+}
+.download-task-toast--success {
+  border-color: rgba(100, 200, 120, 0.35);
+}
+.download-task-toast--error {
+  border-color: rgba(232, 136, 122, 0.4);
+}
+.download-task-toast__track {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
   margin-bottom: 8px;
 }
-.task-card--done { border-color: rgba(100, 200, 120, 0.25); }
-.task-card--error { border-color: rgba(232, 136, 122, 0.25); }
-
-.task-card__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 4px;
-}
-
-.task-title { font-size: 13px; font-weight: 500; color: var(--text); }
-
-.task-badge {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 12px;
-  font-weight: 500;
-}
-.task-badge--pending, .task-badge--parsing { background: var(--accent-dim); color: var(--accent); }
-.task-badge--downloading { background: rgba(100, 150, 255, 0.15); color: #7aabff; }
-.task-badge--done { background: rgba(100, 200, 120, 0.15); color: #6dc886; }
-.task-badge--error { background: var(--danger-bg); color: var(--danger); }
-
-.task-message { font-size: 11px; color: var(--muted); margin: 0 0 6px; }
-
-.task-progress {
-  position: relative;
-  background: var(--border);
-  border-radius: 4px;
-  height: 6px;
-  overflow: visible;
-}
-.task-progress__bar {
+.download-task-toast__fill {
   height: 100%;
   background: var(--accent);
-  border-radius: 4px;
-  transition: width 0.3s ease;
+  border-radius: 3px;
+  transition: width 0.35s ease;
 }
-.task-progress__text {
+.download-task-toast__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.download-task-toast__book {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.download-task-toast__msg {
+  word-break: break-word;
+}
+.download-task-toast__sub {
   font-size: 11px;
   color: var(--muted);
-  display: block;
-  margin-top: 4px;
 }
 
 /* ── 主体：左侧书架 + 右侧章节 ───────────────────────── */
@@ -3278,8 +3302,45 @@ input.drama-taxonomy__episode-count {
 }
 .chapter-book-meta { font-size: 12px; color: var(--muted); margin: 0; }
 
-.chapter-actions { display: flex; gap: 8px; align-items: center; }
+.chapter-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .btn--sm { padding: 5px 12px !important; font-size: 12px !important; }
+
+.chapter-select-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 0 20px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chapter-select-toolbar__hint {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+.chapter-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.chapter-range__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.chapter-range__input {
+  width: 76px !important;
+  flex: 0 0 auto;
+  padding: 5px 8px !important;
+  font-size: 12px !important;
+}
 
 .chapter-list-wrap {
   flex: 1 1 auto;
@@ -3306,8 +3367,35 @@ input.drama-taxonomy__episode-count {
   border-bottom: 1px solid rgba(240,236,230,0.04);
 }
 .chapter-item:hover { background: rgba(255,255,255,0.03); }
+.chapter-item--previewable:hover {
+  background: rgba(255,255,255,0.055);
+}
+.chapter-item--previewable {
+  cursor: pointer;
+}
+.chapter-item--volume-row {
+  opacity: 0.88;
+}
+.chapter-item--volume-row .chapter-item__title {
+  font-style: italic;
+  color: var(--muted);
+}
+
 .chapter-item--done .chapter-item__title { color: var(--text); }
 .chapter-item:not(.chapter-item--done) .chapter-item__title { color: var(--muted); }
+
+.chapter-item__chk {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.chapter-item__chk:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
 
 .chapter-item__index {
   width: 40px;

@@ -92,6 +92,10 @@ class PhaseResult:
     storyboard_excess_shots: bool = False
     #: 分镜：已由系统触发的「超镜再生成」次数
     storyboard_regen_count: int = 0
+    #: 导演通过后「入库/格式自愈」重试次数（不占用导演 REVISE 配额）
+    format_persist_retries: int = 0
+    #: characters 阶段：导演通过后 JSON 结构仍不合格时的自愈重试次数
+    character_json_retries: int = 0
     handoff: HandoffPacket | None = None
     completed_at: float = 0.0
 
@@ -219,6 +223,15 @@ class AgentContext:
                 for pid in ("bible",):
                     _add(pid, prefer_handoff=False)
                     _add_feedback(pid)
+            if self.project_id:
+                try:
+                    from ..project_character_prior import existing_characters_prior_block
+
+                    pri = existing_characters_prior_block(self.project_id)
+                    if pri.strip():
+                        parts.append(pri)
+                except Exception:
+                    pass
 
         elif agent == AgentRole.STORYBOARD:
             # Character summary — use handoff/summary (compact)

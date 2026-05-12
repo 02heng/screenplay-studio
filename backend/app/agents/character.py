@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+from ..pipelines.character_export_parse import parse_character_export
 from .base import BaseAgent
 from .context import AgentContext, AgentRole
 
@@ -33,12 +34,16 @@ class CharacterAgent(BaseAgent):
     def post_phase(self, phase_id: str, text: str, ctx: AgentContext) -> None:
         if phase_id != "characters":
             return
-        try:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                data = json.loads(text[start:end])
-                ctx.results[phase_id].json_data = data
-        except (json.JSONDecodeError, ValueError):
-            pass
+        rows, _err = parse_character_export(text)
+        if rows is not None:
+            ctx.results[phase_id].json_data = {"characters": rows}
+        else:
+            try:
+                start = text.find("{")
+                end = text.rfind("}") + 1
+                if start >= 0 and end > start:
+                    data = json.loads(text[start:end])
+                    ctx.results[phase_id].json_data = data
+            except (json.JSONDecodeError, ValueError):
+                pass
         ctx.summarize_characters()

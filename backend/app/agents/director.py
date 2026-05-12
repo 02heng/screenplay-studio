@@ -120,6 +120,13 @@ class DirectorAgent:
         prev_feedback = result.director_feedback if result and retry_round > 0 else ""
 
         system = _REVIEW_SYS
+        if phase_id == "characters":
+            system += (
+                "\n\n【characters 阶段 · 硬性附加】\n"
+                "- 被审查的正文必须是可被 json.loads 解析的**单一 JSON**；顶层须有键 \"characters\"，且为**非空数组**。\n"
+                "- 每个元素须有非空字符串字段 \"name\"；夹杂 Markdown 说明或非 JSON 正文会导致无法入库。\n"
+                "- **不符合以上任一条必须判 REVISE**（不得以剧情尚可为由 PASS）。"
+            )
         if retry_round > 0:
             system += _REVISION_SYS_SUFFIX.format(
                 retry_round=retry_round,
